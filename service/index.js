@@ -28,14 +28,20 @@ app.use(`/api`, apiRouter);
 
 // CreateAuth a new user
 apiRouter.post('/auth/create', async (req, res) => {
-  if (await findUser('email', req.body.email)) {
-    res.status(409).send({ msg: 'Existing user' });
-  } else {
-    const user = await createUser(req.body.email, req.body.password);
-
-    setAuthCookie(res, user.token);
-    res.send({ email: user.email });
+  const { email, password } = req.body;
+  if (!email || !password) {
+    res.status(400).send({ msg: 'Missing email or password' });
+    return;
   }
+
+  if (await findUser('email', email)) {
+    res.status(409).send({ msg: 'Existing user' });
+    return;
+  }
+
+  const user = await createUser(email, password);
+  setAuthCookie(res, user.token);
+  res.send({ email: user.email });
 });
 
 // GetAuth login an existing user
@@ -138,7 +144,7 @@ async function findUser(field, value) {
 function setAuthCookie(res, authToken) {
   res.cookie(authCookieName, authToken, {
     maxAge: 1000 * 60 * 60 * 24 * 365,
-    secure: true,
+    secure: process.env.NODE_ENV === 'production',
     httpOnly: true,
     sameSite: 'strict',
   });
