@@ -15,14 +15,15 @@ const authCookieName = 'token';
 
 const url = `mongodb+srv://${config.userName}:${config.password}@${config.hostname}`;
 const client = new MongoClient(url);
-const db = client.db('simon');
 
+const db = client.db('simon');
 const userCollection = db.collection('user');
 const scoreCollection = db.collection('score');
 
-// Test DB connection
-(async function testConnection() {
+// Connect DB properly (IMPORTANT FIX)
+(async function connectDB() {
   try {
+    await client.connect();
     await db.command({ ping: 1 });
     console.log('Connected to MongoDB');
   } catch (e) {
@@ -37,7 +38,8 @@ app.use(express.json());
 app.use(cookieParser());
 app.use(express.static('public'));
 
-// Router
+// ---------------- ROUTER ----------------
+
 const apiRouter = express.Router();
 app.use('/api', apiRouter);
 
@@ -48,14 +50,12 @@ apiRouter.post('/auth/create', async (req, res) => {
   const { email, password } = req.body;
 
   if (!email || !password) {
-    res.status(400).send({ msg: 'Missing email or password' });
-    return;
+    return res.status(400).send({ msg: 'Missing email or password' });
   }
 
   const existingUser = await userCollection.findOne({ email });
   if (existingUser) {
-    res.status(409).send({ msg: 'Existing user' });
-    return;
+    return res.status(409).send({ msg: 'Existing user' });
   }
 
   const passwordHash = await bcrypt.hash(password, 10);
@@ -77,13 +77,14 @@ apiRouter.post('/auth/login', async (req, res) => {
   const user = await userCollection.findOne({ email: req.body.email });
 
   if (user && (await bcrypt.compare(req.body.password, user.password))) {
-    user.token = uuid.v4();
+    const newToken = uuid.v4();
+
     await userCollection.updateOne(
       { email: user.email },
-      { $set: { token: user.token } }
+      { $set: { token: newToken } }
     );
 
-    setAuthCookie(res, user.token);
+    setAuthCookie(res, newToken);
     res.send({ email: user.email });
     return;
   }
@@ -95,14 +96,10 @@ apiRouter.post('/auth/login', async (req, res) => {
 apiRouter.delete('/auth/logout', async (req, res) => {
   const token = req.cookies[authCookieName];
 
-  const user = await userCollection.findOne({ token });
-
-  if (user) {
-    await userCollection.updateOne(
-      { email: user.email },
-      { $unset: { token: '' } }
-    );
-  }
+  await userCollection.updateOne(
+    { token },
+    { $unset: { token: '' } }
+  );
 
   res.clearCookie(authCookieName);
   res.status(204).end();
@@ -115,16 +112,14 @@ const verifyAuth = async (req, res, next) => {
     token: req.cookies[authCookieName],
   });
 
-  if (user) {
-    next();
-  } else {
-    res.status(401).send({ msg: 'Unauthorized' });
-  }
+  if (user) return next();
+
+  res.status(401).send({ msg: 'Unauthorized' });
 };
 
 // ---------------- SCORES ----------------
 
-// Get high scores
+// Get scores
 apiRouter.get('/scores', verifyAuth, async (_req, res) => {
   const scores = await scoreCollection
     .find({})
@@ -153,7 +148,10 @@ apiRouter.post('/score', verifyAuth, async (req, res) => {
 // ---------------- ERROR HANDLING ----------------
 
 app.use((err, req, res, next) => {
-  res.status(500).send({ type: err.name, message: err.message });
+  res.status(500).send({
+    type: err.name,
+    message: err.message,
+  });
 });
 
 // Default route
@@ -176,9 +174,10 @@ function setAuthCookie(res, authToken) {
 
 const server = http.createServer(app);
 
-// WebSocket support (UNCHANGED requirement)
+// WebSocket (PeerProxy handles all WS logic)
 new PeerProxy(server);
 
-server.listen(process.env.PORT || 3000, () => {
-  console.log(`Listening on port ${process.env.PORT || 3000}`);
+const port = process.env.PORT || 3000;
+server.listen(port, () => {
+  console.log(`Listening on port ${port}`);
 });
