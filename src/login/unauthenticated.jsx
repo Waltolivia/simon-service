@@ -20,6 +20,7 @@ export function Unauthenticated(props) {
     try {
       const response = await fetch(endpoint, {
         method: 'POST',
+        credentials: 'include', // ✅ FIX ADDED
         body: JSON.stringify({ email: userName, password }),
         headers: {
           'Content-type': 'application/json; charset=UTF-8',
@@ -27,15 +28,14 @@ export function Unauthenticated(props) {
       });
 
       if (response.ok) {
-        // Successful response
         localStorage.setItem('userName', userName);
-        props.onLogin(userName); // This sets you as authenticated
+        props.onLogin(userName);
       } else {
-        // Defensive: try to read JSON, fallback to status text
         let body = {};
         try {
           body = await response.json();
         } catch (err) {}
+
         setDisplayError(`⚠ Error: ${body.msg || response.statusText}`);
       }
     } catch (err) {
@@ -48,16 +48,30 @@ export function Unauthenticated(props) {
       <div>
         <div className='input-group mb-3'>
           <span className='input-group-text'>@</span>
-          <input className='form-control' type='text' value={userName} onChange={(e) => setUserName(e.target.value)} placeholder='your@email.com' />
+          <input
+            className='form-control'
+            type='text'
+            value={userName}
+            onChange={(e) => setUserName(e.target.value)}
+            placeholder='your@email.com'
+          />
         </div>
+
         <div className='input-group mb-3'>
           <span className='input-group-text'>🔒</span>
-          <input className='form-control' type='password' onChange={(e) => setPassword(e.target.value)} placeholder='password' />
+          <input
+            className='form-control'
+            type='password'
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder='password'
+          />
         </div>
-        <Button variant='primary' onClick={() => loginUser()} disabled={!userName || !password}>
+
+        <Button variant='primary' onClick={loginUser} disabled={!userName || !password}>
           Login
         </Button>
-        <Button variant='secondary' onClick={() => createUser()} disabled={!userName || !password}>
+
+        <Button variant='secondary' onClick={createUser} disabled={!userName || !password}>
           Create
         </Button>
       </div>
