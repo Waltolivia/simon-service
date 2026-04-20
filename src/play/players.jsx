@@ -14,16 +14,18 @@ export function Players(props) {
     return () => {
       GameNotifier.removeHandler(handleGameEvent);
     };
-  });
+  }, []);
 
   function handleGameEvent(event) {
-    setEvent([...events, event]);
+    setEvent((prev) => [...prev, event]);
   }
 
   function createMessageArray() {
     const messageArray = [];
+
     for (const [i, event] of events.entries()) {
       let message = 'unknown';
+
       if (event.type === GameEvent.End) {
         message = `scored ${event.value.score}`;
       } else if (event.type === GameEvent.Start) {
@@ -34,11 +36,14 @@ export function Players(props) {
 
       messageArray.push(
         <div key={i} className='event'>
-          <span className={'player-event'}>{event.from.split('@')[0]}</span>
+          <span className={'player-event'}>
+            {event.from.split('@')[0]}
+          </span>
           {message}
         </div>
       );
     }
+
     return messageArray;
   }
 

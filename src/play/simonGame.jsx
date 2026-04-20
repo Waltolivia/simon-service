@@ -39,10 +39,11 @@ export function SimonGame(props) {
   async function reset() {
     setAllowPlayer(false);
     setPlaybackPos(0);
+
     await buttonDance(1);
+
     increaseSequence([]);
 
-    // Let other players know a new game has started
     GameNotifier.broadcastEvent(userName, GameEvent.Start, {});
   }
 
@@ -51,9 +52,6 @@ export function SimonGame(props) {
     setSequence(newSequence);
   }
 
-  // Demonstrates updating state objects based on changes to other state.
-  // All setState calls are asynchronous and so you need to wait until
-  // that state is updated before you can update dependent functionality.
   React.useEffect(() => {
     if (sequence.length > 0) {
       const playSequence = async () => {
@@ -94,14 +92,20 @@ export function SimonGame(props) {
     GameNotifier.broadcastEvent(userName, GameEvent.End, newScore);
   }
 
-  // We use React refs so the game can drive button press events
   buttons.set('button-top-left', { position: 'button-top-left', ref: React.useRef() });
   buttons.set('button-top-right', { position: 'button-top-right', ref: React.useRef() });
   buttons.set('button-bottom-left', { position: 'button-bottom-left', ref: React.useRef() });
   buttons.set('button-bottom-right', { position: 'button-bottom-right', ref: React.useRef() });
 
   const buttonArray = Array.from(buttons, ([key, value]) => {
-    return <SimonButton key={key} ref={value.ref} position={key} onPressed={() => onPressed(key)}></SimonButton>;
+    return (
+      <SimonButton
+        key={key}
+        ref={value.ref}
+        position={key}
+        onPressed={() => onPressed(key)}
+      />
+    );
   });
 
   return (
@@ -112,7 +116,9 @@ export function SimonGame(props) {
           <div className='game-name'>
             Simon<sup>&reg;</sup>
           </div>
-          <div className='score center'>{sequence.length === 0 ? '--' : sequence.length - 1}</div>
+          <div className='score center'>
+            {sequence.length === 0 ? '--' : sequence.length - 1}
+          </div>
           <Button variant='primary' onClick={() => reset()}>
             Reset
           </Button>

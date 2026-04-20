@@ -13,22 +13,33 @@ class EventMessage {
 }
 
 class GameEventNotifier {
-  events = [];
   handlers = [];
+  socket = null;
 
   constructor() {
-    // Simulate chat messages that will eventually come over WebSocket
-    setInterval(() => {
-      const score = Math.floor(Math.random() * 3000);
-      const date = new Date().toLocaleDateString();
-      const userName = 'Berners-Lee';
-      this.broadcastEvent(userName, GameEvent.End, { name: userName, score: score, date: date });
-    }, 5000);
+    const protocol = window.location.protocol === 'http:' ? 'ws' : 'wss';
+    this.socket = new WebSocket(`${protocol}://${window.location.host}/ws`);
+
+    // When receiving a message from another client
+    this.socket.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      this.handlers.forEach((handler) => handler(msg));
+    };
+
+    this.socket.onopen = () => {
+      console.log('WebSocket connected');
+    };
+
+    this.socket.onclose = () => {
+      console.log('WebSocket disconnected');
+    };
   }
 
   broadcastEvent(from, type, value) {
     const event = new EventMessage(from, type, value);
-    this.receiveEvent(event);
+
+    // Send to server → server broadcasts to others
+    this.socket.send(JSON.stringify(event));
   }
 
   addHandler(handler) {
@@ -36,17 +47,7 @@ class GameEventNotifier {
   }
 
   removeHandler(handler) {
-    this.handlers.filter((h) => h !== handler);
-  }
-
-  receiveEvent(event) {
-    this.events.push(event);
-
-    this.events.forEach((e) => {
-      this.handlers.forEach((handler) => {
-        handler(e);
-      });
-    });
+    this.handlers = this.handlers.filter((h) => h !== handler);
   }
 }
 
