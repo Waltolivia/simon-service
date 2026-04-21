@@ -16,14 +16,19 @@ const authCookieName = 'token';
 const url = `mongodb+srv://${config.userName}:${config.password}@${config.hostname}`;
 const client = new MongoClient(url);
 
-const db = client.db('simon');
-const userCollection = db.collection('user');
-const scoreCollection = db.collection('score');
+let db;
+let userCollection;
+let scoreCollection;
 
-// Connect DB properly (IMPORTANT FIX)
+// Connect to MongoDB BEFORE handling requests
 (async function connectDB() {
   try {
     await client.connect();
+
+    db = client.db('simon');
+    userCollection = db.collection('user');
+    scoreCollection = db.collection('score');
+
     await db.command({ ping: 1 });
     console.log('Connected to MongoDB');
   } catch (e) {
@@ -96,10 +101,12 @@ apiRouter.post('/auth/login', async (req, res) => {
 apiRouter.delete('/auth/logout', async (req, res) => {
   const token = req.cookies[authCookieName];
 
-  await userCollection.updateOne(
-    { token },
-    { $unset: { token: '' } }
-  );
+  if (token) {
+    await userCollection.updateOne(
+      { token },
+      { $unset: { token: 1 } }
+    );
+  }
 
   res.clearCookie(authCookieName);
   res.status(204).end();
@@ -108,13 +115,15 @@ apiRouter.delete('/auth/logout', async (req, res) => {
 // ---------------- AUTH MIDDLEWARE ----------------
 
 const verifyAuth = async (req, res, next) => {
-  const user = await userCollection.findOne({
-    token: req.cookies[authCookieName],
-  });
+  const token = req.cookies[authCookieName];
 
-  if (user) return next();
+  const user = await userCollection.findOne({ token });
 
-  res.status(401).send({ msg: 'Unauthorized' });
+  if (user) {
+    next();
+  } else {
+    res.status(401).send({ msg: 'Unauthorized' });
+  }
 };
 
 // ---------------- SCORES ----------------
@@ -132,9 +141,7 @@ apiRouter.get('/scores', verifyAuth, async (_req, res) => {
 
 // Submit score
 apiRouter.post('/score', verifyAuth, async (req, res) => {
-  const newScore = req.body;
-
-  await scoreCollection.insertOne(newScore);
+  await scoreCollection.insertOne(req.body);
 
   const scores = await scoreCollection
     .find({})
@@ -154,12 +161,13 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Default route
+// ---------------- DEFAULT ROUTE ----------------
+
 app.use((_req, res) => {
   res.sendFile('index.html', { root: 'public' });
 });
 
-// ---------------- COOKIE ----------------
+// ---------------- COOKIE HELPER ----------------
 
 function setAuthCookie(res, authToken) {
   res.cookie(authCookieName, authToken, {
@@ -174,7 +182,7 @@ function setAuthCookie(res, authToken) {
 
 const server = http.createServer(app);
 
-// WebSocket (PeerProxy handles all WS logic)
+// WebSocket support (required for Simon DB/service spec)
 new PeerProxy(server);
 
 const port = process.env.PORT || 3000;
