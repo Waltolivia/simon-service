@@ -4,45 +4,40 @@ const express = require('express');
 const uuid = require('uuid');
 const http = require('http');
 const { MongoClient } = require('mongodb');
-
 const PeerProxy = require('./peerProxy');
-
-// dbConfig may or may not exist in production depending on deploy setup
-let config = {};
-try {
-  config = require('./dbConfig.json');
-} catch (e) {
-  console.log('dbConfig.json not found — running in fallback mode (memory only)');
-}
 
 const app = express();
 const authCookieName = 'token';
 
-// ---------------- SAFE DB SETUP ----------------
+// ---------------- SAFE CONFIG ----------------
 
+let config = null;
+
+try {
+  config = require('./dbConfig.json');
+  console.log('DB config loaded');
+} catch {
+  console.log('No dbConfig.json → using memory mode');
+}
+
+// ---------------- DATABASE ----------------
+
+let dbConnected = false;
 let userCollection = null;
 let scoreCollection = null;
-let dbConnected = false;
 
-const url =
-  config.userName && config.password && config.hostname
-    ? `mongodb+srv://${config.userName}:${config.password}@${config.hostname}`
-    : null;
-
-const client = url ? new MongoClient(url) : null;
-
-// fallback memory storage
 let users = [];
 let scores = [];
 
-// connect DB (non-fatal)
+let client = null;
+
 async function initDB() {
-  if (!client) {
-    console.log('No MongoDB config found — using in-memory storage');
-    return;
-  }
+  if (!config) return;
 
   try {
+    const url = `mongodb+srv://${config.userName}:${config.password}@${config.hostname}`;
+    client = new MongoClient(url);
+
     await client.connect();
 
     const db = client.db('simon');
@@ -52,9 +47,9 @@ async function initDB() {
     await db.command({ ping: 1 });
 
     dbConnected = true;
-    console.log('✅ Connected to MongoDB');
+    console.log('MongoDB connected');
   } catch (err) {
-    console.log('⚠️ MongoDB connection failed — switching to memory mode');
+    console.log('MongoDB failed → fallback mode');
     console.log(err.message);
     dbConnected = false;
   }
@@ -81,30 +76,27 @@ function setAuthCookie(res, token) {
   });
 }
 
-async function findUserByEmail(email) {
-  if (dbConnected) return userCollection.findOne({ email });
-  return users.find((u) => u.email === email);
+function getUserByEmail(email) {
+  return dbConnected
+    ? userCollection.findOne({ email })
+    : users.find((u) => u.email === email);
 }
 
-async function findUserByToken(token) {
-  if (dbConnected) return userCollection.findOne({ token });
-  return users.find((u) => u.token === token);
+function getUserByToken(token) {
+  return dbConnected
+    ? userCollection.findOne({ token })
+    : users.find((u) => u.token === token);
 }
 
-// ---------------- AUTH ROUTES ----------------
+// ---------------- AUTH ----------------
 
-// Create
 apiRouter.post('/auth/create', async (req, res) => {
   const { email, password } = req.body;
 
-  if (!email || !password) {
-    return res.status(400).send({ msg: 'Missing email or password' });
-  }
+  if (!email || !password) return res.status(400).send({ msg: 'Missing data' });
 
-  const existing = await findUserByEmail(email);
-  if (existing) {
-    return res.status(409).send({ msg: 'Existing user' });
-  }
+  const existing = await getUserByEmail(email);
+  if (existing) return res.status(409).send({ msg: 'User exists' });
 
   const user = {
     email,
@@ -122,33 +114,31 @@ apiRouter.post('/auth/create', async (req, res) => {
   res.send({ email });
 });
 
-// Login
 apiRouter.post('/auth/login', async (req, res) => {
-  const user = await findUserByEmail(req.body.email);
+  const user = await getUserByEmail(req.body.email);
 
   if (user && (await bcrypt.compare(req.body.password, user.password))) {
-    const newToken = uuid.v4();
+    const token = uuid.v4();
 
     if (dbConnected) {
       await userCollection.updateOne(
         { email: user.email },
-        { $set: { token: newToken } }
+        { $set: { token } }
       );
     } else {
-      user.token = newToken;
+      user.token = token;
     }
 
-    setAuthCookie(res, newToken);
+    setAuthCookie(res, token);
     return res.send({ email: user.email });
   }
 
   res.status(401).send({ msg: 'Unauthorized' });
 });
 
-// Logout
 apiRouter.delete('/auth/logout', async (req, res) => {
   const token = req.cookies[authCookieName];
-  const user = await findUserByToken(token);
+  const user = await getUserByToken(token);
 
   if (user && dbConnected) {
     await userCollection.updateOne(
@@ -164,15 +154,13 @@ apiRouter.delete('/auth/logout', async (req, res) => {
 // ---------------- AUTH MIDDLEWARE ----------------
 
 const verifyAuth = async (req, res, next) => {
-  const user = await findUserByToken(req.cookies[authCookieName]);
+  const user = await getUserByToken(req.cookies[authCookieName]);
   if (user) return next();
-
   res.status(401).send({ msg: 'Unauthorized' });
 };
 
 // ---------------- SCORES ----------------
 
-// Get scores
 apiRouter.get('/scores', verifyAuth, async (_req, res) => {
   if (dbConnected) {
     const result = await scoreCollection
@@ -180,31 +168,23 @@ apiRouter.get('/scores', verifyAuth, async (_req, res) => {
       .sort({ score: -1 })
       .limit(10)
       .toArray();
+
     return res.send(result);
   }
 
   res.send(scores);
 });
 
-// Submit score
 apiRouter.post('/score', verifyAuth, async (req, res) => {
   const newScore = req.body;
 
   if (dbConnected) {
     await scoreCollection.insertOne(newScore);
-
-    const result = await scoreCollection
-      .find({})
-      .sort({ score: -1 })
-      .limit(10)
-      .toArray();
-
-    return res.send(result);
+  } else {
+    scores.push(newScore);
+    scores.sort((a, b) => b.score - a.score);
+    scores = scores.slice(0, 10);
   }
-
-  scores.push(newScore);
-  scores.sort((a, b) => b.score - a.score);
-  scores = scores.slice(0, 10);
 
   res.send(scores);
 });
@@ -212,8 +192,8 @@ apiRouter.post('/score', verifyAuth, async (req, res) => {
 // ---------------- ERROR HANDLER ----------------
 
 app.use((err, _req, res, _next) => {
-  console.error(err);
-  res.status(500).send({ msg: 'Server error', error: err.message });
+  console.error('SERVER ERROR:', err);
+  res.status(500).send({ msg: err.message });
 });
 
 // ---------------- FRONTEND ----------------
@@ -226,10 +206,16 @@ app.use((_req, res) => {
 
 const server = http.createServer(app);
 
-// WebSocket (required for assignment)
-new PeerProxy(server);
+// SAFE WebSocket init
+try {
+  new PeerProxy(server);
+  console.log('WebSocket initialized');
+} catch (e) {
+  console.log('WebSocket failed but server continues:', e.message);
+}
 
 const port = process.env.PORT || 3000;
+
 server.listen(port, () => {
-  console.log(`🚀 Server running on port ${port}`);
+  console.log(`Server running on port ${port}`);
 });
