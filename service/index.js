@@ -6,36 +6,61 @@ const http = require('http');
 const { MongoClient } = require('mongodb');
 
 const PeerProxy = require('./peerProxy');
-const config = require('./dbConfig.json');
+
+// dbConfig may or may not exist in production depending on deploy setup
+let config = {};
+try {
+  config = require('./dbConfig.json');
+} catch (e) {
+  console.log('dbConfig.json not found — running in fallback mode (memory only)');
+}
 
 const app = express();
 const authCookieName = 'token';
 
-// ---------------- DATABASE SETUP ----------------
+// ---------------- SAFE DB SETUP ----------------
 
-const url = `mongodb+srv://${config.userName}:${config.password}@${config.hostname}`;
-const client = new MongoClient(url);
+let userCollection = null;
+let scoreCollection = null;
+let dbConnected = false;
 
-let db;
-let userCollection;
-let scoreCollection;
+const url =
+  config.userName && config.password && config.hostname
+    ? `mongodb+srv://${config.userName}:${config.password}@${config.hostname}`
+    : null;
 
-// Connect to MongoDB BEFORE handling requests
-(async function connectDB() {
+const client = url ? new MongoClient(url) : null;
+
+// fallback memory storage
+let users = [];
+let scores = [];
+
+// connect DB (non-fatal)
+async function initDB() {
+  if (!client) {
+    console.log('No MongoDB config found — using in-memory storage');
+    return;
+  }
+
   try {
     await client.connect();
 
-    db = client.db('simon');
+    const db = client.db('simon');
     userCollection = db.collection('user');
     scoreCollection = db.collection('score');
 
     await db.command({ ping: 1 });
-    console.log('Connected to MongoDB');
-  } catch (e) {
-    console.log(`DB connection failed: ${e.message}`);
-    process.exit(1);
+
+    dbConnected = true;
+    console.log('✅ Connected to MongoDB');
+  } catch (err) {
+    console.log('⚠️ MongoDB connection failed — switching to memory mode');
+    console.log(err.message);
+    dbConnected = false;
   }
-})();
+}
+
+initDB();
 
 // ---------------- MIDDLEWARE ----------------
 
@@ -43,14 +68,32 @@ app.use(express.json());
 app.use(cookieParser());
 app.use(express.static('public'));
 
-// ---------------- ROUTER ----------------
-
 const apiRouter = express.Router();
 app.use('/api', apiRouter);
 
-// ---------------- AUTH ----------------
+// ---------------- AUTH HELPERS ----------------
 
-// Create user
+function setAuthCookie(res, token) {
+  res.cookie(authCookieName, token, {
+    secure: process.env.NODE_ENV === 'production',
+    httpOnly: true,
+    sameSite: 'strict',
+  });
+}
+
+async function findUserByEmail(email) {
+  if (dbConnected) return userCollection.findOne({ email });
+  return users.find((u) => u.email === email);
+}
+
+async function findUserByToken(token) {
+  if (dbConnected) return userCollection.findOne({ token });
+  return users.find((u) => u.token === token);
+}
+
+// ---------------- AUTH ROUTES ----------------
+
+// Create
 apiRouter.post('/auth/create', async (req, res) => {
   const { email, password } = req.body;
 
@@ -58,40 +101,45 @@ apiRouter.post('/auth/create', async (req, res) => {
     return res.status(400).send({ msg: 'Missing email or password' });
   }
 
-  const existingUser = await userCollection.findOne({ email });
-  if (existingUser) {
+  const existing = await findUserByEmail(email);
+  if (existing) {
     return res.status(409).send({ msg: 'Existing user' });
   }
 
-  const passwordHash = await bcrypt.hash(password, 10);
-
   const user = {
     email,
-    password: passwordHash,
+    password: await bcrypt.hash(password, 10),
     token: uuid.v4(),
   };
 
-  await userCollection.insertOne(user);
+  if (dbConnected) {
+    await userCollection.insertOne(user);
+  } else {
+    users.push(user);
+  }
 
   setAuthCookie(res, user.token);
-  res.send({ email: user.email });
+  res.send({ email });
 });
 
 // Login
 apiRouter.post('/auth/login', async (req, res) => {
-  const user = await userCollection.findOne({ email: req.body.email });
+  const user = await findUserByEmail(req.body.email);
 
   if (user && (await bcrypt.compare(req.body.password, user.password))) {
     const newToken = uuid.v4();
 
-    await userCollection.updateOne(
-      { email: user.email },
-      { $set: { token: newToken } }
-    );
+    if (dbConnected) {
+      await userCollection.updateOne(
+        { email: user.email },
+        { $set: { token: newToken } }
+      );
+    } else {
+      user.token = newToken;
+    }
 
     setAuthCookie(res, newToken);
-    res.send({ email: user.email });
-    return;
+    return res.send({ email: user.email });
   }
 
   res.status(401).send({ msg: 'Unauthorized' });
@@ -100,11 +148,12 @@ apiRouter.post('/auth/login', async (req, res) => {
 // Logout
 apiRouter.delete('/auth/logout', async (req, res) => {
   const token = req.cookies[authCookieName];
+  const user = await findUserByToken(token);
 
-  if (token) {
+  if (user && dbConnected) {
     await userCollection.updateOne(
-      { token },
-      { $unset: { token: 1 } }
+      { email: user.email },
+      { $unset: { token: '' } }
     );
   }
 
@@ -115,77 +164,72 @@ apiRouter.delete('/auth/logout', async (req, res) => {
 // ---------------- AUTH MIDDLEWARE ----------------
 
 const verifyAuth = async (req, res, next) => {
-  const token = req.cookies[authCookieName];
+  const user = await findUserByToken(req.cookies[authCookieName]);
+  if (user) return next();
 
-  const user = await userCollection.findOne({ token });
-
-  if (user) {
-    next();
-  } else {
-    res.status(401).send({ msg: 'Unauthorized' });
-  }
+  res.status(401).send({ msg: 'Unauthorized' });
 };
 
 // ---------------- SCORES ----------------
 
 // Get scores
 apiRouter.get('/scores', verifyAuth, async (_req, res) => {
-  const scores = await scoreCollection
-    .find({})
-    .sort({ score: -1 })
-    .limit(10)
-    .toArray();
+  if (dbConnected) {
+    const result = await scoreCollection
+      .find({})
+      .sort({ score: -1 })
+      .limit(10)
+      .toArray();
+    return res.send(result);
+  }
 
   res.send(scores);
 });
 
 // Submit score
 apiRouter.post('/score', verifyAuth, async (req, res) => {
-  await scoreCollection.insertOne(req.body);
+  const newScore = req.body;
 
-  const scores = await scoreCollection
-    .find({})
-    .sort({ score: -1 })
-    .limit(10)
-    .toArray();
+  if (dbConnected) {
+    await scoreCollection.insertOne(newScore);
+
+    const result = await scoreCollection
+      .find({})
+      .sort({ score: -1 })
+      .limit(10)
+      .toArray();
+
+    return res.send(result);
+  }
+
+  scores.push(newScore);
+  scores.sort((a, b) => b.score - a.score);
+  scores = scores.slice(0, 10);
 
   res.send(scores);
 });
 
-// ---------------- ERROR HANDLING ----------------
+// ---------------- ERROR HANDLER ----------------
 
-app.use((err, req, res, next) => {
-  res.status(500).send({
-    type: err.name,
-    message: err.message,
-  });
+app.use((err, _req, res, _next) => {
+  console.error(err);
+  res.status(500).send({ msg: 'Server error', error: err.message });
 });
 
-// ---------------- DEFAULT ROUTE ----------------
+// ---------------- FRONTEND ----------------
 
 app.use((_req, res) => {
   res.sendFile('index.html', { root: 'public' });
 });
 
-// ---------------- COOKIE HELPER ----------------
-
-function setAuthCookie(res, authToken) {
-  res.cookie(authCookieName, authToken, {
-    maxAge: 1000 * 60 * 60 * 24 * 365,
-    secure: process.env.NODE_ENV === 'production',
-    httpOnly: true,
-    sameSite: 'strict',
-  });
-}
-
 // ---------------- SERVER ----------------
 
 const server = http.createServer(app);
 
-// WebSocket support (required for Simon DB/service spec)
+// WebSocket (required for assignment)
 new PeerProxy(server);
 
 const port = process.env.PORT || 3000;
 server.listen(port, () => {
-  console.log(`Listening on port ${port}`);
+  console.log(`🚀 Server running on port ${port}`);
 });
